@@ -92,5 +92,28 @@ object StreamDecoderTest extends Properties("StreamDecoder") {
     } &&
     cleanedUp == 3
   }
+
+  // def intraFrame[H,A](header: StreamDecoder[H])(
+  //                     frameSizeInBits: H => Long)(
+  //                     collectFrames: Process1[(H,BitVector), A]): StreamDecoder[A]
+
+  property("frame combinators") = secure {
+    val strings = List("a")
+    import scodec.stream.{encode => E}
+    val frameSize = 16
+    val bits = E.once(string).many.chunk(frameSize) // split into frames
+                .mapBits(bits => int32.encodeValid(bits.size.toInt) ++ bits) // add header
+                .encodeAllValid(strings)
+    val reframe = prefixFramePayloads(tryOnce(int32))(identity).takeWhile(_.nonEmpty)
+    val decoder: StreamDecoder[String] = (for {
+      sizeBits <- reframe firstAfter { _.size < 32 } // prefetch until we have enough to decode an int
+      size <- prepend(sizeBits) ++ once(int32)       // push back what we read and decode that int
+      stringBits <- reframe firstAfter { _.size < size*8 } // read across frames until we have enough for full string
+      s <- prepend(sizeBits ++ stringBits) ++ once(string) // now read the string, discarding the frame structure
+    } yield s).many // and do this repeatedly until input is exhausted
+
+    val result = decoder.decodeValidStrict(bits).toList
+    result == strings
+  }
 }
 

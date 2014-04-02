@@ -92,10 +92,90 @@ package object decode {
   def once[A](implicit A: Decoder[A]): StreamDecoder[A] =
     ask flatMap { runDecode[A] }
 
+  /** Add the given bits to the front of the input vector. */
+  def prepend(bits: BitVector): StreamDecoder[Nothing] =
+    // we use the constructor to avoid forcing the stream
+    modify(BitVector.Append(bits, _)).edit { _.drain }
+
+  /**
+   * Returns the stream of (header, frame payload) pairs extracted
+   * from a stream of frames. Each frame consists of a header,
+   * decoded using `header`, from which we extract a size
+   * in bits using the `sizeInBits` function. Folllowing the header
+   * is a frame payload of the number of bits specified in the header.
+   */
+  def frames[H](header: StreamDecoder[H])(sizeInBits: H => Long): StreamDecoder[(H,BitVector)] =
+    header flatMap { hdr =>
+      ask flatMap { bits =>
+        val actualBits = sizeInBits(hdr)
+        emit(hdr -> bits.take(actualBits)) ++
+        advance(actualBits) ++
+        frames(header)(sizeInBits)
+      }
+    }
+
+  /** Defined as: `frames(header)(sizeInBits).map(_._2)` */
+  def framePayloads[H](header: StreamDecoder[H])(sizeInBits: H => Long): StreamDecoder[BitVector] =
+    frames(header)(sizeInBits).map(_._2)
+
+  /** Defined as: `prefixFrames(header)(sizeInBits).map(_._2)` */
+  def prefixFramePayloads[H](header: StreamDecoder[H])(sizeInBits: H => Long): StreamDecoder[BitVector] =
+    prefixFrames(header)(sizeInBits).map(_._2)
+
+  /** Like `frames`, but frame payload sizes are specified in bytes. */
+  def byteFrames[H](header: StreamDecoder[H])(sizeInBytes: H => Long): StreamDecoder[(H,BitVector)] =
+    frames(header)(sizeInBytes andThen (_ * 8))
+
+  /** Defined as: `prefixByteFrames(header)(sizeInBytes).map(_._2)` */
+  def prefixByteFramePayloads[H](header: StreamDecoder[H])(sizeInBytes: H => Long): StreamDecoder[BitVector] =
+    prefixByteFrames(header)(sizeInBytes).map(_._2)
+
+  /**
+   * Like `frames`, but each emitted frame payload is concatenated with
+   * all previous frame payloads. Useful when constructing streaming
+   * decoders that may need to straddle frame boundaries. For instance,
+   * `prefixFrames(uint64)(identity).firstAfter(_.size < 32)` combines frames
+   * until their combined size exceeds 32, then emits this accumulated
+   * frame.
+   */
+  def prefixFrames[H](header: StreamDecoder[H])(sizeInBits: H => Long):
+      StreamDecoder[(Vector[H], BitVector)] =
+    frames(header)(sizeInBits) |>
+    process1.scan(Vector[H]() -> BitVector.empty)((acc, frame: (H,BitVector)) =>
+      (acc._1 :+ frame._1, acc._2 ++ frame._2)
+    ).drop(1)
+
+  /**
+   * Like `prefixFrames`, but takes a function which extracts a size in
+   * bytes from the header.
+   */
+  def prefixByteFrames[H](header: StreamDecoder[H])(sizeInBytes: H => Long):
+      StreamDecoder[(Vector[H], BitVector)] =
+    prefixFrames(header)(sizeInBytes andThen (_ * 8))
+
+  /**
+   * Run `d` on a stream of frames, where the frame size in bytes is parsed using
+   * the given decoder. A frame of size less than 0 terminates decoding.
+   */
+  def isolateByteFrames[A](sizeInBytes: Decoder[Long])(d: StreamDecoder[A]): StreamDecoder[A] =
+    isolateFrames(sizeInBytes.map(_ * 8))(d)
+
+  /**
+   * Run `d` on a stream of frames, where the frame size in bits is parsed using
+   * the given decoder. A frame of size less than 0 terminates decoding.
+   */
+  def isolateFrames[A](sizeInBits: Decoder[Long])(d: StreamDecoder[A]): StreamDecoder[A] =
+    once(sizeInBits) flatMap {
+      case i if i < 0 => halt
+      case actualBits => d.isolate(actualBits) ++ isolateFrames(sizeInBits)(d)
+    }
+
   /**
    * Like [[scodec.stream.decode.once]], but halts normally and leaves the
    * input unconsumed in the event of a decoding error. `tryOnce[A].repeat`
-   * will produce the same result as `many[A]`, but allows.
+   * will produce the same result as `many[A]`, but if decoding fails after
+   * three elements have been read, the cursor is reset to just after the
+   * end of the third element and this decoder halts without an error.
    */
   def tryOnce[A](implicit A: Decoder[A]): StreamDecoder[A] = ask flatMap { in =>
     A.decode(in).fold(
