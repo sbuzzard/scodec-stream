@@ -69,7 +69,7 @@ trait StreamEncoder[-A] {
       if (acc.size >= bitsPerChunk)
         Process.emit(acc.take(bitsPerChunk)) ++ chunker(acc.drop(bitsPerChunk))
       else
-        Process.receive1Or[BitVector, BitVector](Process.emit(acc))(Process.emit).flatMap { bits => chunker(acc ++ bits) }
+        Process.receive1Or[BitVector, BitVector](Process.emit(acc))(bits => chunker(acc ++ bits))
     }
     this pipeBits { chunker(BitVector.empty) }
   }

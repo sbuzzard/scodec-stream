@@ -181,7 +181,7 @@ package object decode {
    * should be handled by `p1`.
    */
   def or[A](p1: StreamDecoder[A], p2: StreamDecoder[A]) =
-    p1.tee(p2)((P.awaitL[A].repeat: Tee[A,A,A]) orElse P.awaitR[A].repeat)
+    p1.tee(p2)(P.awaitBoth[A,A])
 
   /**
    * Run this decoder, but leave its input unconsumed. Note that this
